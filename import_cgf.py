@@ -204,34 +204,79 @@ class ImportCGF:
 
         def load_material_image(image_path, alias_name=None, reuse_images: bool = False):
             print("load_material_image: %s" % image_path)
-            filepath = image_path
-            if not os.path.isabs(image_path):
-                filepath = os.path.join(project_root, image_path)
-            if not os.path.exists(filepath):
-                filepath = os.path.join(
-                    project_root, os.path.basename(image_path))
-
+            
+            # Normalize the path separators
+            image_path = image_path.replace('\\', '/')
+            
+            # List of possible paths to check
+            possible_paths = []
+            
+            # If the path is absolute, just use it
+            if os.path.isabs(image_path):
+                possible_paths.append(image_path)
+            else:
+                # Try the project root + relative path
+                if project_root:
+                    possible_paths.append(os.path.join(project_root, image_path))
+                
+                # Try the CGF file's directory + relative path
+                cgf_dir = os.path.dirname(self.filepath)
+                possible_paths.append(os.path.join(cgf_dir, image_path))
+                
+                # Try the project root + just the filename
+                if project_root:
+                    possible_paths.append(os.path.join(project_root, os.path.basename(image_path)))
+                
+                # Try the CGF file's directory + just the filename
+                possible_paths.append(os.path.join(cgf_dir, os.path.basename(image_path)))
+                
+                # Try to find the texture by traversing up from the CGF directory
+                # This handles cases where textures are in a sibling directory
+                current_dir = cgf_dir
+                while current_dir != os.path.dirname(current_dir):  # Stop at root
+                    possible_paths.append(os.path.join(current_dir, image_path))
+                    current_dir = os.path.dirname(current_dir)
+            
+            # Find the first path that exists
+            filepath = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    filepath = path
+                    break
+            
+            # If no path exists, use the first one as a fallback (it will fail gracefully later)
+            if filepath is None:
+                filepath = possible_paths[0] if possible_paths else image_path
+            
+            # Normalize the path
             filepath = filepath.replace('\\', '/').replace('//', '/')
-
+            
             base_name = os.path.basename(filepath)
             dir_name = os.path.dirname(filepath)
-
+            
             fileNameWithoutExt, fileNameExt = os.path.splitext(base_name)
-
+            
             if self.dds_convert and fileNameExt.lower() == ".dds":
                 self.convert_dds_to_png(filepath)
                 base_name = fileNameWithoutExt.lower() + '.png'
-
+            
             image = None
             if reuse_images:
                 if bpy.data.images.find(base_name) != -1:
                     image = bpy.data.images.get(base_name)
-
+            
             if image is None:
-                image = load_image(base_name, dir_name)
+                try:
+                    image = load_image(base_name, dir_name)
+                    if image is None:
+                        print(f"Warning: Texture '{base_name}' not found in '{dir_name}'. Skipping texture.")
+                except Exception as e:
+                    print(f"Warning: Failed to load texture '{base_name}': {str(e)}. Skipping texture.")
+                    image = None
+            
             if not alias_name:
                 alias_name = os.path.basename(image_path)
-
+            
             return (alias_name, image)
 
         alpha_test = chunk.alpha_test > 0.0 and chunk.alpha_test < 1.0
@@ -242,64 +287,46 @@ class ImportCGF:
             if determine_texture_map(chunk, 'tex_o'):
                 (alias_name, image) = load_material_image(to_str(chunk.tex_o.long_name), to_str(
                     chunk.tex_o.name) if chunk.tex_o.name else None, reuse_images)
+                if image is not None:
+                    ma_wrap.alpha_texture.image = image
+                    ma_wrap.alpha_texture.texcoords = 'UV'
+                    ma_wrap.material.node_tree.links.new(
+                        ma_wrap.node_principled_bsdf.inputs['Alpha'], ma_wrap.alpha_texture.node_image.outputs['Alpha'])
+                else:
+                    print(f"Warning: Opacity texture '{alias_name}' is missing. Using default alpha.")
 
-                # opacity_texture = node_shader_utils.ShaderImageTextureWrapper(ma_wrap, ma_wrap.node_principled_bsdf, ma_wrap.node_principled_bsdf.inputs['Alpha'])
-                # opacity_texture.image = image
-                # opacity_texture.texcoords = 'UV'
-                ma_wrap.alpha_texture.image = image
-                ma_wrap.alpha_texture.texcoords = 'UV'
-                ma_wrap.material.node_tree.links.new(
-                    ma_wrap.node_principled_bsdf.inputs['Alpha'], ma_wrap.alpha_texture.node_image.outputs['Alpha'])
-                has_opacity_texture = True
-
+            # For diffuse texture
             if determine_texture_map(chunk, 'tex_d'):
                 (alias_name, image) = load_material_image(to_str(chunk.tex_d.long_name),
                                                           to_str(chunk.tex_d.name) if chunk.tex_d.name else None, reuse_images)
-                ma_wrap.base_color_texture.image = image
-                ma_wrap.base_color_texture.texcoords = 'UV'
+                if image is not None:
+                    ma_wrap.base_color_texture.image = image
+                    ma_wrap.base_color_texture.texcoords = 'UV'
+                    if not has_opacity_texture and (chunk.opacity < 1.0 or alpha_test):
+                        ma_wrap.material.node_tree.links.new(
+                            ma_wrap.node_principled_bsdf.inputs['Alpha'], ma_wrap.base_color_texture.node_image.outputs['Alpha'])
+                else:
+                    print(f"Warning: Diffuse texture '{alias_name}' is missing. Using base color only.")
 
-                if not has_opacity_texture and (chunk.opacity < 1.0 or alpha_test):
-                    ma_wrap.material.node_tree.links.new(
-                        ma_wrap.node_principled_bsdf.inputs['Alpha'], ma_wrap.base_color_texture.node_image.outputs['Alpha'])
-
+            # For emission texture
             if determine_texture_map(chunk, 'tex_a'):
                 (alias_name, image) = load_material_image(to_str(chunk.tex_a.long_name), to_str(
                     chunk.tex_a.name) if chunk.tex_a.name else None, reuse_images)
-                ma_wrap.emission_color_texture.image = image
-                ma_wrap.emission_color_texture.texcoords = 'UV'
+                if image is not None:
+                    ma_wrap.emission_color_texture.image = image
+                    ma_wrap.emission_color_texture.texcoords = 'UV'
+                else:
+                    print(f"Warning: Emission texture '{alias_name}' is missing. Using default emission.")
+
+            # For specular texture
             if determine_texture_map(chunk, 'tex_s'):
                 (alias_name, image) = load_material_image(to_str(chunk.tex_s.long_name), to_str(
                     chunk.tex_s.name) if chunk.tex_s.name else None, reuse_images)
-                ma_wrap.specular_texture.image = image
-                ma_wrap.specular_texture.texcoords = 'UV'
-
-            if determine_texture_map(chunk, 'tex_b'):
-                (alias_name, image) = load_material_image(to_str(chunk.tex_b.long_name), to_str(
-                    chunk.tex_b.name) if chunk.tex_b.name else None, reuse_images)
-                ma_wrap.normalmap_texture.image = image
-                ma_wrap.normalmap_texture.texcoords = 'UV'
-            if determine_texture_map(chunk, 'tex_g'):
-                (alias_name, image) = load_material_image(to_str(chunk.tex_g.long_name), to_str(
-                    chunk.tex_g.name) if chunk.tex_g.name else None, reuse_images)
-                ma_wrap.roughness_texture.image = image
-                ma_wrap.roughness_texture.texcoords = 'UV'
-            if determine_texture_map(chunk, 'tex_f'):
-                print('No implemented for tex_f.');
-                pass
-            if determine_texture_map(chunk, 'tex_c'):
-                print('No implemented for tex_f.');
-                pass
-            if determine_texture_map(chunk, 'tex_r'):
-                (alias_name, image) = load_material_image(to_str(chunk.tex_r.long_name), to_str(
-                    chunk.tex_r.name) if chunk.tex_r.name else None, reuse_images)
-                ma_wrap.metallic_texture.image = image
-                ma_wrap.metallic_texture.texcoords = 'UV'
-            if determine_texture_map(chunk, 'tex_subsurf'):
-                print('No implemented for tex_subsurf.');
-                pass
-            if determine_texture_map(chunk, 'tex_detail'):
-                print('No implemented for tex_detail.');
-                pass
+                if image is not None:
+                    ma_wrap.specular_texture.image = image
+                    ma_wrap.specular_texture.texcoords = 'UV'
+                else:
+                    print(f"Warning: Specular texture '{alias_name}' is missing. Using default specular.")
 
         if chunk.opacity < 1.0:
             ma_wrap.alpha = chunk.opacity

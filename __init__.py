@@ -33,7 +33,6 @@ bl_info = {
     "location": "File > Import-Export",
     "description": "Import-Export CGF, Import CGF mesh, UV's, materials and textures",
     "warning": "",
-    "support": "TESTING",
     "category": "Import-Export"}
 
 global current_dir
@@ -126,7 +125,7 @@ class AionImporter(bpy.types.Operator, ImportHelper):
 
         keywords['global_matrix'] = global_matrix
 
-        if bpy.data.is_saved and context.user_preferences.filepaths.use_relative_paths:
+        if bpy.data.is_saved and context.preferences.filepaths.use_relative_paths:
             keywords['relpath'] = os.path.dirname(bpy.data.filepath)
 
         self.report({'INFO'}, "Call import_cgf.load(context, **keywords)")
